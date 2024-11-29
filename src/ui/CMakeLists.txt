@@ -1,0 +1,11 @@
+SET(SOURCES screens/ui_ws2812fx.c
+    ui.c
+    components/ui_comp_hook.c
+    ui_helpers.c
+    images/ui_img_ws2812fx_png.c
+    fonts/ui_font_sony16.c
+    fonts/ui_font_sony18.c
+    fonts/ui_font_sony20.c
+    fonts/ui_font_sony80.c)
+
+add_library(ui ${SOURCES})
