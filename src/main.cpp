@@ -56,6 +56,10 @@
 
 #include "ui/ui.h"
 
+#include "FS.h"
+#include "FFat.h"
+#include <ArduinoJson.h>
+
 /* inbuilt LED on VIEWE display 4.0" */
 // #define LED_COUNT 1
 // #define LED_PIN 42
@@ -63,6 +67,8 @@
 /* external */
 #define LED_COUNT 60
 #define LED_PIN 46
+
+#define FLASH FFat
 
 
 struct Preset
@@ -76,7 +82,12 @@ struct Preset
   lv_obj_t *text;
 };
 
+unsigned long last;
+bool newData = false;
+
 WS2812FX ws2812fx = WS2812FX(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+DynamicJsonDocument local(2048);
 
 Preset presets[12] = {
     {.set = true, .mode = 0, .brightness = 100, .color = RED, .speed = 1000, .button = NULL, .text = NULL},
@@ -92,6 +103,76 @@ Preset presets[12] = {
     {.set = true, .mode = 44, .brightness = 100, .color = BLUE, .speed = 1000, .button = NULL, .text = NULL},
     {.set = true, .mode = 45, .brightness = 100, .color = PURPLE, .speed = 1000, .button = NULL, .text = NULL},
 };
+
+void readData()
+{
+  String result;
+  // Open the file in read mode
+  File file = FLASH.open("/ws2812fx.json", FILE_READ);
+
+  if (file)
+  {
+    // Read data from the file and store it in the result variable
+    while (file.available())
+    {
+      result += (char)file.read();
+    }
+    file.close();
+    // Debug print the result
+
+    deserializeJson(local, result);
+  }
+}
+
+void writeData()
+{
+  String data;
+  serializeJson(local, data);
+
+  File file = FLASH.open("/ws2812fx.json", FILE_WRITE);
+  if (file)
+  {
+    // Write data to the file
+    int s = file.print(data);
+    file.flush();
+    file.close();
+  }
+}
+
+void savePresets()
+{
+  for (int i = 0; i < 12; i++)
+  {
+    local["presets"][i]["mode"] = presets[i].mode;
+    local["presets"][i]["brightness"] = presets[i].brightness;
+    local["presets"][i]["speed"] = presets[i].speed;
+    local["presets"][i]["color"] = presets[i].color;
+  }
+}
+
+void readPresets()
+{
+  if (local.containsKey("presets"))
+  {
+    JsonArray arr = local["presets"].as<JsonArray>();
+    for (int i = 0; i < arr.size(); i++)
+    {
+      if (i >= 12)
+      {
+        break;
+      }
+      JsonObject obj = arr[i].as<JsonObject>();
+      presets[i].mode = obj["mode"].as<uint8_t>();
+      presets[i].brightness = obj["brightness"].as<uint8_t>();
+      presets[i].speed = obj["speed"].as<long>();
+      presets[i].color = obj["color"].as<uint32_t>();
+    }
+  }
+  else
+  {
+    savePresets();
+  }
+}
 
 void onModeSelect(lv_event_t *e)
 {
@@ -120,6 +201,21 @@ void onColorChange(lv_event_t *e)
   ws2812fx.setColor(lv_color_to32(c));
 }
 
+void onInfoClicked(lv_event_t *e)
+{
+  lv_obj_add_flag(ui_infoPanel, LV_OBJ_FLAG_HIDDEN);
+  local["info"] = true;
+  newData = true;
+}
+
+void onSavePresets(lv_event_t * e)
+{
+  lv_obj_clear_flag(ui_infoPanel, LV_OBJ_FLAG_HIDDEN);
+  writeData();
+  delay(2000);
+  ESP.restart();
+}
+
 void onPresetClick(lv_event_t *e)
 {
   lv_event_code_t event_code = lv_event_get_code(e);
@@ -127,6 +223,11 @@ void onPresetClick(lv_event_t *e)
   if (event_code == LV_EVENT_CLICKED)
   {
     int index = (int)lv_event_get_user_data(e);
+
+    if (!presets[index].set)
+    {
+      return;
+    }
     ws2812fx.setMode(presets[index].mode);
     ws2812fx.setColor(presets[index].color);
     // ws2812fx.setBrightness(presets[index].brightness); /* causes esp32 to reboot. (library issue) */
@@ -136,6 +237,10 @@ void onPresetClick(lv_event_t *e)
     lv_dropdown_set_selected(ui_modeSelect, presets[index].mode);
     // lv_slider_set_value(ui_brightness, presets[index].brightness, LV_ANIM_ON);
     lv_slider_set_value(ui_speed, presets[index].speed, LV_ANIM_ON);
+
+    local["current"] = index;
+
+    newData = true;
   }
 
   if (event_code == LV_EVENT_LONG_PRESSED)
@@ -149,6 +254,9 @@ void onPresetClick(lv_event_t *e)
     lv_obj_set_style_bg_color(presets[index].button, lv_color_hex(presets[index].color), LV_PART_MAIN | LV_STATE_DEFAULT);
     String text = String(ws2812fx.getModeName(presets[index].mode)) + "\n" + presets[index].brightness + "\n" + presets[index].speed;
     lv_label_set_text(presets[index].text, text.c_str());
+
+    savePresets();
+    newData = true;
   }
 }
 
@@ -177,7 +285,7 @@ void addPresetButton(Preset preset, int index)
   lv_label_set_text(presets[index].text, text.c_str());
   lv_obj_set_style_text_font(presets[index].text, &ui_font_sony20, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-  lv_obj_add_event_cb(presets[index].button, onPresetClick, LV_EVENT_ALL , (void *)index);
+  lv_obj_add_event_cb(presets[index].button, onPresetClick, LV_EVENT_ALL, (void *)index);
 }
 
 void setup()
@@ -187,12 +295,34 @@ void setup()
   Serial.begin(115200);
   Serial.println(title + " start");
 
+  if (!FLASH.begin())
+  {
+    // Timber.e("FFat Mount Failed");
+    FLASH.format();
+  }
+
+  readData();
+  readPresets();
+
   ws2812fx.init();
   ws2812fx.setBrightness(255);
   ws2812fx.setSpeed(1000);
   ws2812fx.setColor(RED);
   ws2812fx.setMode(FX_MODE_STATIC);
   ws2812fx.start();
+
+  if (local.containsKey("current"))
+  {
+    int c = local["current"].as<uint8_t>();
+    if (c >= 12)
+    {
+      c = 0;
+    }
+    ws2812fx.setMode(presets[c].mode);
+    ws2812fx.setColor(presets[c].color);
+    // ws2812fx.setBrightness(presets[c].brightness);
+    ws2812fx.setSpeed(presets[c].speed);
+  }
 
   Serial.println("Initialize panel device");
   ESP_Panel *panel = new ESP_Panel();
@@ -238,22 +368,39 @@ void setup()
   }
 
   lv_dropdown_set_options(ui_modeSelect, modes.c_str());
-
   lv_colorwheel_set_rgb(ui_color, lv_color_hex(ws2812fx.getColor()));
   lv_dropdown_set_selected(ui_modeSelect, ws2812fx.getMode());
   lv_slider_set_value(ui_brightness, ws2812fx.getBrightness(), LV_ANIM_ON);
   lv_slider_set_value(ui_speed, ws2812fx.getSpeed(), LV_ANIM_ON);
 
+  if (local.containsKey("info") && local["info"].as<bool>())
+  {
+    lv_obj_add_flag(ui_infoPanel, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_add_flag(ui_infoPanel, LV_OBJ_FLAG_HIDDEN);
+
+  lv_label_set_text(ui_infoText, "Due to a bug with display when saving data, "
+                                "the ESP32 will be restarted after saving presets data."
+                                "You will need to longpress on the WS2812FX logo to save presets.");
+
   /* Release the mutex */
   lvgl_port_unlock();
 
   Serial.println(title + " end");
+
 }
 
 void loop()
 {
-  // Serial.println("IDLE loop");
-  // delay(100);
-
   ws2812fx.service();
+
+  if (millis() > last + 10000)
+  {
+    last = millis() + 10000;
+    if (newData)
+    {
+      newData = false;
+      // writeData();
+    }
+  }
 }

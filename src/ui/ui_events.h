@@ -15,6 +15,8 @@ void onBrightnessChange(lv_event_t * e);
 void onSpeedChange(lv_event_t * e);
 void onColorChange(lv_event_t * e);
 void onPresetClick(lv_event_t * e);
+void onSavePresets(lv_event_t * e);
+void onInfoClicked(lv_event_t * e);
 
 #ifdef __cplusplus
 } /*extern "C"*/
